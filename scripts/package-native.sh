@@ -49,7 +49,7 @@ cp "$HELPERD_BIN" native/macplay-bluetooth/macplay-bluetooth "$RES/driver/"
 # Refuse a package whose runtime cannot execute on its advertised architecture.
 for required in "${REQUIRED_ARCHES[@]}"; do
   for binary in "$APP/Contents/MacOS/MacPlay" "$RECEIVER/Contents/MacOS/MacPlayReceiver" "$RES/driver/"* "$RES/engine/node_modules/"*/build/Release/*.node; do
-    lipo -verify_arch "$required" "$binary"
+    lipo "$binary" -verify_arch "$required"
   done
 done
 rm -rf "$RES/gstreamer"
@@ -64,7 +64,7 @@ if [[ -n "${MACPLAY_APPLEMEDIA_UNIVERSAL:-}" ]]; then
 fi
 for required in "${REQUIRED_ARCHES[@]}"; do
   while IFS= read -r -d '' binary; do
-    lipo -verify_arch "$required" "$binary"
+    lipo "$binary" -verify_arch "$required"
   done < <(find "$RES/gstreamer/macos-arm64" -type f \( -name '*.dylib' -o -name 'gst-*' \) -print0)
 done
 

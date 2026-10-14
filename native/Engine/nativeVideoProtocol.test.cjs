@@ -116,3 +116,22 @@ test('media rejects file, script, credentials and FairPlay URLs', () => {
   for (const url of ['file:///C:/secret', 'javascript:alert(1)', 'skd://key', 'https://user:password@example.com/', 'data:text/html,bad', 'not a url']) assert.equal(playableUrl(url), false, url);
   for (const url of ['https://example.com/a.mp4', 'http://192.168.1.2/media', 'app-resource://id']) assert.equal(playableUrl(url), true, url);
 });
+
+test('revoking availability stops the item, cancels phone loads, and rejects later inserts', async t => {
+  const stack = new CpStack({ ...config(), videoInCar: true, videoPlaybackAllowed: true });
+  const events = [], commands = [];
+  const session = { videoNegotiated: true, videoStreams: new Map([[3, 'video']]), audioMeta: [] };
+  stack._sessionSock.set(session, {}); stack._liveSession = session;
+  stack._sendVideoCommand = (_, stream, message) => { commands.push(message); return true; };
+  stack.on('native-video', message => events.push(message));
+  t.after(() => stack._teardown(session));
+  const playback = stack._videoPlayback(session);
+  playback.handle(3, { type: 'insertPlayQueueItem', item: { uuid: 'first', 'Content-Location': 'fixture://clip' } });
+  const id = events.at(-1).itemId, pending = stack.resolveVideoUrl(id, 'fixture://segment');
+  stack.setVideoPlaybackAllowed(false);
+  assert.equal(events.at(-1).action, 'stop'); assert.equal((await pending).status, 410);
+  playback.handle(3, { type: 'insertPlayQueueItem', item: { uuid: 'late', 'Content-Location': 'fixture://late' } });
+  assert.equal(commands.at(-1).error.code, -12927);
+  stack.updateVideoState(id, { prepared: true, playing: true });
+  assert.equal(events.at(-1).action, 'stop');
+});

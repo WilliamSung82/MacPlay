@@ -114,7 +114,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  try {
   const update=JSON.parse(line)
   if(update.command==='native-video-state'&&typeof update.itemId==='string'&&update.state&&typeof update.state==='object')nativeVideo.update(update.itemId,update.state)
-  if(update.command==='native-video-allowed'){for(const stack of sessions)stack.setVideoPlaybackAllowed(update.allowed===true);if(update.allowed!==true)nativeVideo.stop()}
+  if(update.command==='native-video-allowed'){config.videoPlaybackAllowed=config.videoInCar&&update.allowed===true;for(const stack of sessions)stack.setVideoPlaybackAllowed(config.videoPlaybackAllowed);if(!config.videoPlaybackAllowed)nativeVideo.stop()}
   if(update.command==='language' && typeof update.language==='string')addon.macplaySetWindowLanguage(update.language)
   if(update.command==='seek' && active && videoReady && phoneInfo?.deviceId) {
    const ms=Number(update.positionMs),id=String(update.requestId||'')

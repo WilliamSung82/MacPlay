@@ -56,8 +56,8 @@ manifest={'source':'https://github.com/WilliamSung82/MacPlay','commit':sys.argv[
           'physicalIPhoneNativeVideoVerified':False}
 (app/'Contents/Resources/VIDEO-BUILD.json').write_text(json.dumps(manifest,indent=2)+'\n')
 PY
-lipo -verify_arch "$ARCH" "$APP/Contents/MacOS/MacPlay"
-lipo -verify_arch "$ARCH" "$APP/Contents/Resources/runtime/MacPlayReceiver.app/Contents/MacOS/MacPlayReceiver"
+lipo "$APP/Contents/MacOS/MacPlay" -verify_arch "$ARCH"
+lipo "$APP/Contents/Resources/runtime/MacPlayReceiver.app/Contents/MacOS/MacPlayReceiver" -verify_arch "$ARCH"
 codesign --force --deep --sign - --timestamp=none "$APP"
 codesign --verify --deep --strict "$APP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/MacPlay-Video-1.2.2-preview-$ARCH.zip"

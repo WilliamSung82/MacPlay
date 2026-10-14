@@ -15,13 +15,10 @@ type HostMessage = Record<string, unknown>
 type Owner = Pick<CpStack, 'resolveVideoUrl' | 'updateVideoState'>
 
 export class NativeVideoBridge {
-  private proxy: ResourceServer
+  private proxy?: ResourceServer
   private current?: { id: string; owner: Owner; ready: boolean; queued: HostMessage[] }
   private closed = false
-  constructor(private send: (message: HostMessage) => void) {
-    this.proxy = new VideoResourceServer((id, url) => this.current?.id === id
-      ? this.current.owner.resolveVideoUrl(id, url) : Promise.resolve({ status: 410 }))
-  }
+  constructor(private send: (message: HostMessage) => void) {}
 
   handle(owner: Owner, message: HostMessage): void {
     if (this.closed || typeof message.itemId !== 'string') return
@@ -29,7 +26,9 @@ export class NativeVideoBridge {
       this.stop()
       const item = { id: message.itemId, owner, ready: false, queued: [] as HostMessage[] }
       this.current = item
-      void this.proxy.start(item.id, String(message.url), message.streaming === true).then(url => {
+      const proxy = this.proxy ??= new VideoResourceServer((id, url) => this.current?.id === id
+        ? this.current.owner.resolveVideoUrl(id, url) : Promise.resolve({ status: 410 }))
+      void proxy.start(item.id, String(message.url), message.streaming === true).then(url => {
         if (this.current !== item || !url) return
         // A setRate or seek can arrive before the proxy has bound its local port.
         this.send({ type: 'native-video', ...message, url })
@@ -62,9 +61,9 @@ export class NativeVideoBridge {
     if (owner && this.current?.owner !== owner) return
     const item = this.current
     this.current = undefined
-    this.proxy.stop()
+    this.proxy?.stop()
     if (item) this.send({ type: 'native-video', action: 'stop', itemId: item.id })
   }
 
-  close(): void { this.closed = true; this.stop(); this.proxy.close() }
+  close(): void { this.closed = true; this.stop(); this.proxy?.close() }
 }

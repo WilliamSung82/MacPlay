@@ -51,6 +51,8 @@ enum SmokeError: Error { case failed(String) }
             // Local files never reach AVPlayer, even through a malformed engine message.
             controller.handle(["action":"load", "itemId":"blocked", "url":"file:///etc/passwd"])
             guard state["error"] as? String == "network", controller.player.currentItem == nil else { throw SmokeError.failed("local file accepted") }
+            controller.handle(["action":"stop", "itemId":"blocked"])
+            guard controller.itemID == nil else { throw SmokeError.failed("failed item did not stop") }
             let json = try JSONSerialization.data(withJSONObject: ["passed":true,"results":results], options: [.sortedKeys])
             print(String(decoding:json,as:UTF8.self)); exit(0)
         } catch {

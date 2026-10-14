@@ -71,7 +71,10 @@ import AVFoundation
             report()
             return
         }
-        guard itemID == id, !failed else { return }
+        guard itemID == id else { return }
+        // The engine sends stop in response to a decoder/network error as well.
+        if action == "stop" { stop(); return }
+        guard !failed else { return }
         switch action {
         case "rate":
             desiredPlaying = message["playing"] as? Bool == true
@@ -82,7 +85,6 @@ import AVFoundation
             report()
         case "seek": if let seconds = message["seconds"] as? Double { seek(finite(seconds)) }
         case "show": show()
-        case "stop": stop()
         default: break
         }
     }

@@ -57,6 +57,10 @@ import { buildResponse, parseMessages, type RtspRequest, type RtspResponse } fro
 import { ScreenStream } from './screenStream'
 import { TimingSync } from './timingServer'
 import type { CpAudioProfile, CpStackConfig, CpStreamProfile } from './types'
+import { asVideoMessage, VIDEO_FEATURE, VIDEO_UI_URL, VIDEO_SETTINGS_UUID, VIDEO_REMOTE_UUIDS, type VideoMessage } from './videoInCar'
+import { VideoPlayback, type VideoResource } from './videoPlayback'
+import { VideoSettingsChannel } from './videoSettingsChannel'
+
 
 const STREAM_TYPE_MAIN_SCREEN = 110
 const STREAM_TYPE_ALT_SCREEN = 111
@@ -138,6 +142,13 @@ const OCTET_CONTENT_TYPE = 'application/octet-stream'
 
 /** Per-connection handshake + session state. */
 interface CpSession {
+  videoNegotiated?: boolean
+  videoAllowedSent?: boolean
+  videoSettings?: VideoSettingsChannel
+  videoStreams?: Map<number, string>
+  nextVideoStreamId?: number
+  videoPlayback?: VideoPlayback
+  recordResponseSent?: boolean
   pairSetup: PairSetup
   pairVerify: PairVerify
   /** Set once pair-verify succeeds; from then on the connection is framed + encrypted. */
@@ -315,6 +326,7 @@ export class CpStack extends EventEmitter {
           }
           if(this._closing || session.ended && req.method !== 'TEARDOWN' || sock.destroyed)return
           sock.write(session.cipher ? session.cipher.encrypt(out) : out)
+          if (req.method === 'RECORD') this._recordResponseWritten(session)
           // pair-verify M4 is answered in plaintext; encryption starts on the next message.
           if (!session.cipher && session.pairVerify.controlKeys) {
             const k = session.pairVerify.controlKeys
@@ -361,6 +373,12 @@ export class CpStack extends EventEmitter {
   private _teardown(session: CpSession): void {
     if(session.ended)return
     session.ended=true
+    session.videoPlayback?.stop()
+    session.videoSettings?.stop()
+    session.videoStreams?.clear()
+    session.videoNegotiated = false
+    session.videoAllowedSent = undefined
+    session.recordResponseSent = false
     session.eventSock?.destroy();session.eventSock=null
     if (session.heartbeat) {
       clearInterval(session.heartbeat)
@@ -445,6 +463,17 @@ export class CpStack extends EventEmitter {
       const streams = body?.streams
       if (Array.isArray(streams)) {
         types = streams.map((s) => Number((s as Record<string, PlistValue>).type))
+        for (const stream of streams) {
+          const entry = asVideoMessage(stream)
+          if (Number(entry?.type) !== STREAM_TYPE_DATA) continue
+          const id = Number(entry?.streamID)
+          // Video control streams must never tear down the iAP tunnel (stream 1).
+          if (id === 2) { session.videoSettings?.stop(); session.videoSettings = undefined }
+          if (session.videoStreams?.has(id)) {
+            session.videoStreams.delete(id)
+            session.videoPlayback?.closeStream(id)
+          }
+        }
       }
     } catch {
       /* no/invalid body -> fall through to a full session teardown */
@@ -483,7 +512,7 @@ export class CpStack extends EventEmitter {
     const chatty = req.method === 'OPTIONS' || req.path.toLowerCase().endsWith('/feedback')
     if (!chatty) {
       console.log(`[cpStack] < ${req.method} ${req.path} (body ${req.body.length}B)`)
-      if (DEBUG && req.body.length > 0) {
+      if (DEBUG && req.body.length > 0 && !req.path.toLowerCase().endsWith('/command')) {
         try {
           const decoded = decodeBplist(req.body)
           console.log(
@@ -612,6 +641,19 @@ export class CpStack extends EventEmitter {
       /* empty or non-plist body: nothing to route */
     }
     const type = String(body.type ?? '')
+    const streamId = Number(req.headers?.['x-apple-streamid'])
+    const params = asVideoMessage(body.params)
+    if (session.videoNegotiated && session.videoStreams?.has(streamId) && Buffer.isBuffer(params?.data)) {
+      try {
+        const message = asVideoMessage(decodeBplist(params.data))
+        if (message) this._videoPlayback(session).handle(streamId, message)
+      } catch { return { status: 400 } }
+      return { status: 200 }
+    }
+    if (type === 'requestUI' && params?.url === VIDEO_UI_URL) {
+      session.videoPlayback?.show()
+      return { status: 200 }
+    }
     // The car/home button in the CarPlay dock sends requestUI (no url), asking us
     // to bring up the head-unit's own UI. Mirror AA's host-ui-requested path.
     if (type === 'requestUI') {
@@ -657,9 +699,8 @@ export class CpStack extends EventEmitter {
       console.log(`[cpStack] unduckAudio durationMs=${durationMs}`)
       this.emit('duck', 1, durationMs)
     } else if (type) {
-      // Unrouted command: log the whole body so a new message type can be identified.
-      const j = JSON.stringify(body, (_k, v) => (typeof v === 'bigint' ? Number(v) : v))
-      console.log(`[cpStack] unhandled command '${type}' (ack 200) ${j}`)
+      // Commands can contain signed media URLs. Record only a bounded command name.
+      console.log(`[cpStack] unhandled command '${type.slice(0, 80)}' (ack 200)`)
     }
     return { status: 200 }
   }
@@ -788,6 +829,9 @@ export class CpStack extends EventEmitter {
     const feats: PlistValue[] = this.cfg.hevc ? ['hevc', 'iAPChannel'] : ['iAPChannel']
     feats.push('viewAreas')
     if (this.cfg.cluster) feats.push('altScreen')
+    session.videoNegotiated = this.cfg.videoInCar === true && Array.isArray(dict.features) && dict.features.includes(VIDEO_FEATURE)
+    if (session.videoNegotiated) feats.push(VIDEO_FEATURE)
+    if (this.cfg.videoInCar && !session.videoNegotiated) this.emit('protocol-state', 'CarPlay Video', 'This iPhone session did not propose native video playback')
     resp.enabledFeatures = feats
     return { headers: { 'Content-Type': PLIST_CONTENT_TYPE }, body: encodeBplist(resp) }
   }
@@ -807,11 +851,17 @@ export class CpStack extends EventEmitter {
           const readKey = hkdfSha512(shared, 'Events-Salt', 'Events-Read-Encryption-Key', 32)
           session.eventCipher = new ControlCipher(readKey, writeKey)
         }
+        const previous = session.eventSock
         session.eventSock = s
+        session.videoAllowedSent = undefined
+        previous?.destroy()
         this._active = session
+        this._sendVideoAvailability(session)
+        this.emit('protocol-state', 'event-connected', '')
         let enc: Buffer = Buffer.alloc(0)
         let plain: Buffer = Buffer.alloc(0)
         s.on('data', (chunk: Buffer) => {
+          if (session.eventSock !== s) return
           const cipher = session.eventCipher
           if (!cipher) return
           enc = Buffer.concat([enc, chunk])
@@ -830,8 +880,11 @@ export class CpStack extends EventEmitter {
         s.on('error', () => {})
         s.on('close', () => {
           console.log('[cpStack] event channel closed')
-          session.eventSock = null
-          if (this._active === session) this._active = null
+          if (session.eventSock === s) {
+            session.eventSock = null; session.eventCipher = null
+            session.videoAllowedSent = undefined
+            if (this._active === session) this._active = null
+          }
         })
       })
       server.on('error', reject)
@@ -917,17 +970,56 @@ export class CpStack extends EventEmitter {
         console.warn(`[cpStack] event response ${msg.path} ${msg.protocol ?? ''}`)
       return
     }
-    let decoded = ''
-    if (msg.body.length) {
-      try {
-        decoded = ` ${JSON.stringify(decodeBplist(msg.body))}`
-      } catch {
-        decoded = ` (${msg.body.length}B non-plist body)`
-      }
-    }
-    console.log(`[cpStack] event < ${msg.method} ${msg.path}${decoded}`)
+    // Media URLs may carry credentials; never include command bodies in diagnostics.
     if (!session.eventSock || !session.eventCipher) return
-    session.eventSock.write(session.eventCipher.encrypt(buildResponse(msg, { status: 200 })))
+    const response = msg.method === 'POST' && msg.path === '/command' ? this._handleCommand(msg, session) : { status: 200 }
+    session.eventSock.write(session.eventCipher.encrypt(buildResponse(msg, response)))
+  }
+
+  private _recordResponseWritten(session: CpSession): void {
+    if (this._closing || session.ended) return
+    session.recordResponseSent = true
+    this._sendVideoAvailability(session)
+  }
+
+  private _videoPlayback(session: CpSession): VideoPlayback {
+    return session.videoPlayback ??= new VideoPlayback(
+      (stream, message) => this._sendVideoCommand(session, stream, message),
+      message => this.emit('native-video', message),
+      () => session.videoNegotiated === true && this.cfg.videoPlaybackAllowed === true && !session.ended)
+  }
+
+  private _sendVideoCommand(s: CpSession, stream: number, message: VideoMessage): boolean {
+    if (!s.recordResponseSent || !s.eventSock || !s.eventCipher || s.ended || !s.videoStreams?.has(stream)) return false
+    const body = encodeBplist({ params: { data: encodeBplist(message) } })
+    const head = `POST /command RTSP/1.0\r\nContent-Type: ${PLIST_CONTENT_TYPE}\r\nContent-Length: ${body.length}\r\nX-Apple-StreamID: ${stream}\r\nCSeq: ${++s.eventCseq}\r\n\r\n`
+    s.eventSock.write(s.eventCipher.encrypt(Buffer.concat([Buffer.from(head), body])))
+    return true
+  }
+
+  private _sendVideoAvailability(s: CpSession): void {
+    if (!s.videoNegotiated || !s.recordResponseSent || !s.eventSock || !s.eventCipher || s.ended) return
+    const allowed = this.cfg.videoPlaybackAllowed === true
+    if (s.videoAllowedSent === allowed) return
+    this._sendEventCommand(s, encodeBplist({ type: 'setVideoPlaybackAllowed', params: { videoPlaybackAllowed: allowed } }))
+    s.videoAllowedSent = allowed
+    this.emit('protocol-state', 'CarPlay Video', allowed ? 'Native video negotiated; desktop playback enabled' : 'Native video playback disabled')
+  }
+
+  setVideoPlaybackAllowed(allowed: boolean): void {
+    this.cfg.videoPlaybackAllowed = this.cfg.videoInCar === true && allowed
+    for (const s of this._sessionSock.keys()) {
+      if (!this.cfg.videoPlaybackAllowed) s.videoPlayback?.stop()
+      this._sendVideoAvailability(s)
+    }
+  }
+
+  updateVideoState(itemId: string, state: Record<string, unknown>): void {
+    for (const s of this._sessionSock.keys()) s.videoPlayback?.update(itemId, state)
+  }
+
+  resolveVideoUrl(itemId: string, url: string): Promise<VideoResource> {
+    return this._liveSession?.videoPlayback?.resolveUrl(itemId, url) ?? Promise.resolve({ status: 410 })
   }
 
   private _sendEventCommand(s: CpSession, body: Buffer): void {
@@ -1096,6 +1188,30 @@ export class CpStack extends EventEmitter {
     session: CpSession
   ): Promise<PlistValue | null> {
     const uuid = String(sd.clientTypeUUID ?? '').toUpperCase()
+    if (uuid !== IAP_DATASTREAM_UUID && session.videoNegotiated) {
+      if (VIDEO_REMOTE_UUIDS.has(uuid) && Number(sd.controlType) === 1) {
+        const streamID = session.nextVideoStreamId ?? 3
+        session.nextVideoStreamId = streamID + 1
+        const streams = session.videoStreams ??= new Map()
+        if (streams.size >= 16) return null
+        streams.set(streamID, uuid)
+        this.emit('protocol-state', 'CarPlay Video', 'Native video control stream ready')
+        return { type: STREAM_TYPE_DATA, streamID }
+      }
+      if (uuid === VIDEO_SETTINGS_UUID) {
+        const shared = session.pairVerify.sharedSecret
+        if (!shared || (typeof sd.seed !== 'bigint' && typeof sd.seed !== 'number')) return null
+        const seed = BigInt.asUintN(64, BigInt(sd.seed)).toString()
+        const key = (label: string) => hkdfSha512(shared, `DataStream-Salt${seed}`, label, 32)
+        const channel = new VideoSettingsChannel(key('DataStream-Output-Encryption-Key'), key('DataStream-Input-Encryption-Key'), session.peerHost)
+        const dataPort = await channel.listen()
+        this._ensureOpen(session, () => channel.stop())
+        session.videoSettings?.stop()
+        session.videoSettings = channel
+        return { type: STREAM_TYPE_DATA, streamID: 2, dataPort,
+          ...(sd.streamConnectionID === undefined ? {} : { streamConnectionID: sd.streamConnectionID }) }
+      }
+    }
     if (uuid !== IAP_DATASTREAM_UUID) {
       console.log(`[cpStack]   DataStream ${uuid || '(no uuid)'} not handled yet`)
       return null

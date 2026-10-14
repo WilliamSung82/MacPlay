@@ -48,6 +48,9 @@ export interface CpStreamProfile extends CpAudioProfile {
 }
 
 export interface CpStackConfig {
+  /** Opt-in native video for stationary desktop testing; not a vehicle gear sensor. */
+  videoInCar?: boolean
+  videoPlaybackAllowed?: boolean
   audioVolume?: (audioType:number)=>number
   /** Name shown as the car on the phone. */
   deviceName: string

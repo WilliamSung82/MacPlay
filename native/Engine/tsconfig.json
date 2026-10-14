@@ -10,10 +10,16 @@
     "types": [
       "node"
     ],
-    "ignoreDeprecations": "6.0"
+    "ignoreDeprecations": "6.0",
+    "allowJs": true
   },
   "include": [
     "*.ts",
-    "protocol/*.ts"
+    "protocol/*.ts",
+    "*.cjs"
+  ],
+  "exclude": [
+    "**/*.test.cjs",
+    "test-support/**"
   ]
 }

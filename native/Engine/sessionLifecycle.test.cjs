@@ -18,6 +18,7 @@ function fixture(){
   if(id.startsWith('node:'))return require(id);
   if(id==='../media')return media;
   if(id==='./bplist')return plist;
+  if(id==='./videoInCar')return require(path.join(engine,'protocol/videoInCar.js'));
   return {};
  };
  vm.runInNewContext(fs.readFileSync(path.join(engine,'protocol/cpStack.js'),'utf8'),

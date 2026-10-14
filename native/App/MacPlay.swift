@@ -32,7 +32,8 @@ struct PhoneChoice: Codable, Identifiable {
 }
 
 struct PlaySettings: Codable {
-    var language: String? = nil
+    var language: String? = "en"
+    var nativeVideoEnabled: Bool? = nil
     var autoReconnect: Bool? = nil
     var autoStartUSB: Bool? = nil
     var backgroundEnabled: Bool? = nil
@@ -68,6 +69,8 @@ struct PlaySettings: Codable {
 
 @MainActor final class PlayModel: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var settings = PlaySettings()
+    @Published var nativeVideoStatus = "Native CarPlay Video is off"
+    let nativeVideo = NativeVideoPlayer()
     @Published var displays: [DisplayChoice] = []
     @Published var audioInputs: [AudioChoice] = []
     @Published var audioOutputs: [AudioChoice] = []
@@ -113,12 +116,17 @@ struct PlaySettings: Codable {
     private var input: Pipe?
     private var output: Pipe?
     private var pending = Data()
-    let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MacPlay")
+    let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MacPlay Video")
     var authDirectory: URL { directory.appendingPathComponent("authentication") }
     var configURL: URL { directory.appendingPathComponent("settings.json") }
     var logURL: URL { directory.appendingPathComponent("MacPlay.log") }
     override init() {
         super.init()
+        nativeVideo.sendState = { [weak self] id, state in
+            self?.sendVideoCommand(["command": "native-video-state", "itemId": id, "state": state])
+        }
+        nativeVideo.statusChanged = { [weak self] status in self?.nativeVideoStatus = status }
+        nativeVideo.showCarPlay = { [weak self] in self?.showCarPlayWindow() }
         locationManager.delegate = self
         try? FileManager.default.createDirectory(at: authDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         if let data = try? Data(contentsOf: configURL), let decoded = try? JSONDecoder().decode(PlaySettings.self, from:data) { settings = decoded }
@@ -194,12 +202,28 @@ struct PlaySettings: Codable {
         if let uid=settings.inputDevice,!uid.isEmpty,!audioInputs.contains(where:{$0.id==uid}){settings.inputDevice=nil}
         if let uid=settings.outputDevice,!uid.isEmpty,!audioOutputs.contains(where:{$0.id==uid}){settings.outputDevice=nil}
     }
+    func sendVideoCommand(_ message: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: message), let line = String(data: data, encoding: .utf8) else { return }
+        command(line)
+    }
+    func setNativeVideoEnabled(_ enabled: Bool) {
+        settings.nativeVideoEnabled = enabled
+        // Do not revive video in a later automatic reconnect after revocation.
+        appliedSettings?.nativeVideoEnabled = enabled
+        successfulSettings?.nativeVideoEnabled = enabled
+        persistPreferences()
+        if !enabled { nativeVideo.stop() }
+        sendVideoCommand(["command": "native-video-allowed", "allowed": enabled])
+        nativeVideoStatus = enabled ? "Apply and reconnect the iPhone to negotiate native video" : "Native CarPlay Video is off"
+    }
     func applyLiveAudio() {
+        nativeVideo.setAudio(volume: settings.volume, enabled: settings.audioEnabled)
         let message:[String:Any]=["command":"audio","volume":settings.volume,"callVolume":settings.callVolume ?? 1,"enabled":settings.audioEnabled]
         if let data=try? JSONSerialization.data(withJSONObject:message),let line=String(data:data,encoding:.utf8){command(line)}
         if let data=try? JSONEncoder().encode(settings){try? data.write(to:configURL,options:.atomic);try? FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:configURL.path)}
     }
     func showCarPlayWindow() {
+        nativeVideo.hideAndPause()
         guard let task=process,task.isRunning else {return}
         MacPlayApplicationDelegate.shared?.prepareCarPlayPresentation()
         if let receiver=NSRunningApplication(processIdentifier:task.processIdentifier) {
@@ -633,6 +657,7 @@ struct PlaySettings: Codable {
         } catch {status="启动失败";detail=error.localizedDescription}
     }
     func stop(restoreMain:Bool=true,preserveReconnect:Bool=false) {
+        nativeVideo.stop()
         if !preserveReconnect {cancelReconnect()}
         if let task=process,task.isRunning {
             // Give the receiver time to close its window and USB/Bluetooth helpers
@@ -653,6 +678,14 @@ struct PlaySettings: Codable {
         while let newline=pending.firstIndex(of:0x0a) {
             let line=String(decoding:pending[..<newline],as:UTF8.self);pending.removeSubrange(...newline)
             if let eventData=line.data(using:.utf8),let event=(try? JSONSerialization.jsonObject(with:eventData)) as? [String:Any] {
+                if event["type"] as? String == "native-video" {
+                    guard settings.nativeVideoEnabled == true || event["action"] as? String == "stop" else { continue }
+                    nativeVideo.setAudio(volume: settings.volume, enabled: settings.audioEnabled)
+                    nativeVideo.handle(event); continue
+                }
+                if event["type"] as? String == "native-video-status" {
+                    nativeVideoStatus = event["detail"] as? String ?? ""; continue
+                }
                 if let kind=event["type"] as? String,kind=="seekResult" {publishNowPlaying(event);continue}
                 if let kind=event["type"] as? String,kind=="nowplaying" || kind=="albumart" {continue}
                 if event["showCarPlay"] as? Bool == true {
@@ -793,6 +826,12 @@ struct SettingsView: View {
                             }
                         }
                     case .display:
+                        Section("CarPlay Video") {
+                            Toggle("Native video (experimental desktop test)", isOn: Binding(get: { model.settings.nativeVideoEnabled == true }, set: { model.setNativeVideoEnabled($0) }))
+                            Text("The iPhone controls playback; this Mac plays the video. Enable, apply and reconnect, then select MacPlay Video in a supported video's AirPlay output menu.").font(.callout).foregroundStyle(.secondary)
+                            Text("For stationary desktop testing. Protected streaming services are not supported.").font(.callout).foregroundStyle(.secondary)
+                            Text(model.nativeVideoStatus).font(.callout).foregroundStyle(.secondary)
+                        }
                         Section(L("显示器")) {
                             Picker(L("显示位置"),selection:Binding(get:{model.settings.displayID ?? model.displays.first?.id ?? 0},set:{model.settings.displayID=$0;model.updateResolution()})) {
                                 ForEach(model.displays){Text($0.label).tag($0.id)}

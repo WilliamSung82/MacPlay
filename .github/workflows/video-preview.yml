@@ -1,0 +1,49 @@
+name: Native CarPlay Video preview
+on:
+  push:
+    branches: [feature/carplay-video]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: video-preview-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+      - run: npx --yes pnpm@10.11.0 install --frozen-lockfile --ignore-scripts
+      - run: npx --yes pnpm@10.11.0 run build:engine && npx --yes pnpm@10.11.0 test
+      - name: Build and verify application
+        run: bash scripts/build-video-preview.sh '${{ matrix.arch }}'
+      - name: Generate test media
+        run: |
+          command -v ffmpeg >/dev/null || brew install ffmpeg
+          mkdir -p build/video-fixtures
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=640x360:rate=30 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 10 -c:v libx264 -pix_fmt yuv420p -g 60 -c:a aac -movflags +faststart build/video-fixtures/clip.mp4
+          ffmpeg -hide_banner -loglevel error -i build/video-fixtures/clip.mp4 -c copy -hls_time 2 -hls_list_size 0 -hls_segment_filename build/video-fixtures/segment%03d.ts build/video-fixtures/stream.m3u8
+      - name: Decode MP4 and HLS with the real macOS AVPlayer
+        run: |
+          swiftc -parse-as-library -framework AppKit -framework AVKit -framework AVFoundation native/App/NativeVideoPlayer.swift scripts/test-native-video.swift -o build/test-native-video
+          node scripts/test-native-video.cjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MacPlay-Video-${{ matrix.arch }}
+          path: |
+            dist/MacPlay-Video-*.zip
+            dist/MacPlay-Video-*.sha256
+            build/native-video-result.json
+          if-no-files-found: error

@@ -28,7 +28,7 @@ struct GitHubRelease: Decodable {
         let asset = images.first { item in architecture.contains { item.name.lowercased().contains($0) } }
             ?? images.first { $0.name.lowercased().contains("universal") }
         guard let asset, let url = URL(string: asset.browser_download_url), url.scheme == "https",
-              url.host == "github.com", url.path.hasPrefix("/Roylyl/MacPlay/releases/download/") else { return nil }
+              url.host == "github.com", url.path.hasPrefix("/WilliamSung82/MacPlay/releases/download/") else { return nil }
         return url
     }
 }
@@ -41,7 +41,7 @@ struct GitHubRelease: Decodable {
     @Published var showPrompt = false
     @Published var exportStatus = ""
     @Published var exportDetail = ""
-    @Published var automatic = UserDefaults.standard.object(forKey: "MacPlay.automaticUpdates") as? Bool ?? true
+    @Published var automatic = UserDefaults.standard.object(forKey: "MacPlay.automaticUpdates") as? Bool ?? false
     private var automaticTimer:Timer?
     private var didStartupCheck=false
     func startAutomaticChecks() {
@@ -85,7 +85,7 @@ struct GitHubRelease: Decodable {
         Task {
             defer { checking = false }
             do {
-                var request = URLRequest(url: URL(string: "https://api.github.com/repos/Roylyl/MacPlay/releases?per_page=100")!)
+                var request = URLRequest(url: URL(string: "https://api.github.com/repos/WilliamSung82/MacPlay/releases?per_page=100")!)
                 request.timeoutInterval = 15
                 request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
                 request.setValue("MacPlay/\(currentVersion)", forHTTPHeaderField: "User-Agent")
@@ -119,7 +119,7 @@ struct GitHubRelease: Decodable {
         dismissPrompt()
     }
     func openRelease() {
-        if let url = URL(string: release?.html_url ?? "https://github.com/Roylyl/MacPlay/releases"), url.scheme == "https", url.host == "github.com" { NSWorkspace.shared.open(url) }
+        if let url = URL(string: release?.html_url ?? "https://github.com/WilliamSung82/MacPlay/releases"), url.scheme == "https", url.host == "github.com" { NSWorkspace.shared.open(url) }
     }
     func exportLogs(_ model: PlayModel) {
         exportDetail = ""
@@ -153,7 +153,7 @@ struct MacPlayAboutView: View {
             LabeledContent(L("构建版本"), value: updates.build)
             LabeledContent(L("运行架构"), value: updates.architecture)
             LabeledContent(L("开源许可"), value: "GPL-3.0-or-later")
-            Link(L("项目主页"), destination: URL(string: "https://github.com/Roylyl/MacPlay")!)
+            Link(L("项目主页"), destination: URL(string: "https://github.com/WilliamSung82/MacPlay")!)
         }
         Section(L("软件更新")) {
             Toggle(L("自动检查更新"), isOn: Binding(get: { updates.automatic }, set: { updates.setAutomatic($0) }))

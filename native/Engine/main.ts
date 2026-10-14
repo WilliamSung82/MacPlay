@@ -1,3 +1,4 @@
+import { NativeVideoBridge } from './nativeVideoBridge'
 import { Discovery } from './discovery'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -32,7 +33,8 @@ diagnostic('starting',{wireless:settings.wireless,interface:settings.wifiInterfa
 const identity=loadOrCreateIdentity()
 const icons=[256,512].map(size=>({widthPixels:size,heightPixels:size,data:fs.readFileSync(path.join(resources,'icons',`macplay-${size}.png`))}))
 const helperControl=new CpHelperSock()
-const config={deviceName:'MacPlay',deviceId:accessoryDeviceId(identity.pubRaw),btMac:settings.bluetoothMAC||'02:4d:50:00:00:02',sourceVersion:'950.7.1',hevc:true,h264:true,main:displayConfig(settings),port:17000,entertainmentSampleRate:48000 as const,disableAudioOutput:!settings.audioEnabled,audioVolume:(type:number)=>type===2 ? settings.callVolume??1 : type===3 ? settings.volume??1 : 1,audioDevice:()=>settings.outputDevice||undefined,audioInputDevice:()=>settings.inputDevice||undefined,mfi:helperControl,oemLabel:'MacPlay',icons,rightHandDrive:false}
+const config={videoInCar:settings.nativeVideoEnabled===true,videoPlaybackAllowed:settings.nativeVideoEnabled===true,deviceName:'MacPlay Video',deviceId:accessoryDeviceId(identity.pubRaw),btMac:settings.bluetoothMAC||'02:4d:50:00:00:02',sourceVersion:'950.7.1',hevc:true,h264:true,main:displayConfig(settings),port:17000,entertainmentSampleRate:48000 as const,disableAudioOutput:!settings.audioEnabled,audioVolume:(type:number)=>type===2 ? settings.callVolume??1 : type===3 ? settings.volume??1 : 1,audioDevice:()=>settings.outputDevice||undefined,audioInputDevice:()=>settings.inputDevice||undefined,mfi:helperControl,oemLabel:'MacPlay',icons,rightHandDrive:false}
+const nativeVideo=new NativeVideoBridge(message=>process.stdout.write(JSON.stringify(message)+'\n'))
 const sessions=new Set<CpStack>()
 let active: CpStack|undefined
 let wiredReady=false
@@ -73,13 +75,15 @@ const server=net.createServer(socket=>{
  socket.once('close',()=>{if(!active&&!stopping){networkConnected=false;discovery?.announce()}})
  const usbSession=wiredReady && !socket.remoteAddress?.endsWith('%'+settings.wifiInterface)
  diagnostic('control-connected',{family:socket.remoteFamily});if(!videoReady)log('收到连接请求','正在协商认证与音视频')
- const stack=new CpStack(config);sessions.add(stack)
+ const stack=new CpStack({...config});sessions.add(stack)
  stack.deviceFilter=id=>acceptsPhone(settings.targetBluetooth,id,!!active && active!==stack)
  stack.on('device-info',(info:{name:string;deviceId:string})=>{active=stack;phoneInfo=info})
  stack.setVideoActive(true);stack.setAudioActive(settings.audioEnabled)
  stack.on('session-active',()=>{sessionReady=true;frameRateGuard.negotiationStarted();armDeadline();stack.setStreamVolume(3,settings.volume??1,0);stack.setStreamVolume(2,settings.callVolume??1,0);if(!videoReady)log('CarPlay会话已建立','等待视频流');if(usbSession)usb('CarPlay会话已建立，等待视频流')})
  stack.on('disconnect-reason',(reason:string)=>{disconnectReason=reason})
- stack.on('session-ended',()=>{const hadVideo=videoReady;frameRateGuard.failed();sessions.delete(stack);if(active===stack){active=undefined;videoReady=false;sessionReady=false;log(disconnectReason,'重新启动接收可再次连接');if(disconnectedAfterSession(hadVideo,stopping,settings.fps)){process.stdout.write(JSON.stringify({disconnected:true,reason:disconnectReason})+'\n');shutdown()}}if(usbSession)usb('CarPlay会话已断开，可点击“应用并重新连接”')})
+ stack.on('session-ended',()=>{const hadVideo=videoReady;nativeVideo.stop(stack);frameRateGuard.failed();sessions.delete(stack);if(active===stack){active=undefined;videoReady=false;sessionReady=false;log(disconnectReason,'重新启动接收可再次连接');if(disconnectedAfterSession(hadVideo,stopping,settings.fps)){process.stdout.write(JSON.stringify({disconnected:true,reason:disconnectReason})+'\n');shutdown()}}if(usbSession)usb('CarPlay会话已断开，可点击“应用并重新连接”')})
+ stack.on('native-video',message=>{if(!stopping&&active===stack)nativeVideo.handle(stack,message)})
+ stack.on('protocol-state',(stage:string,detail:string)=>{if(stage==='CarPlay Video')process.stdout.write(JSON.stringify({type:'native-video-status',detail})+'\n')})
  stack.on('host-ui-requested',()=>{process.stdout.write(JSON.stringify({showMain:true})+'\n');diagnostic('show-main')})
  stack.on('error',(e:Error)=>{diagnostic('session-error',e.message);if(!videoReady)log('会话错误',e.message)})
  stack.attachSocket(socket)
@@ -109,6 +113,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  if(line==='show'){if(videoReady)showVideoWindow();else log('等待CarPlay视频','视频尚未建立，暂不打开空白画面窗口。')}
  try {
   const update=JSON.parse(line)
+  if(update.command==='native-video-state'&&typeof update.itemId==='string'&&update.state&&typeof update.state==='object')nativeVideo.update(update.itemId,update.state)
+  if(update.command==='native-video-allowed'){for(const stack of sessions)stack.setVideoPlaybackAllowed(update.allowed===true);if(update.allowed!==true)nativeVideo.stop()}
   if(update.command==='language' && typeof update.language==='string')addon.macplaySetWindowLanguage(update.language)
   if(update.command==='seek' && active && videoReady && phoneInfo?.deviceId) {
    const ms=Number(update.positionMs),id=String(update.requestId||'')
@@ -129,5 +135,5 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 })
 const startupDeadline=setTimeout(()=>{if(!stopping&&!videoReady){disconnectReason='连接启动超时';diagnostic('handoff-summary',discovery?.summary());log(disconnectReason);process.stdout.write(JSON.stringify({disconnected:true,reason:disconnectReason})+'\n');shutdown()}},90000)
 let stopping=false
-function shutdown(){if(stopping)return;stopping=true;discovery?.destroy();clearTimeout(startupDeadline);videoDeadline.cancel();frameRateGuard.cancel();clearInterval(pump);clearInterval(mediaStats);for(const s of sessions)s.stop();addon.macplayCloseVideoWindow();server.close();helper.kill('SIGTERM');setTimeout(()=>process.exit(0),300).unref()}
+function shutdown(){if(stopping)return;stopping=true;nativeVideo.close();discovery?.destroy();clearTimeout(startupDeadline);videoDeadline.cancel();frameRateGuard.cancel();clearInterval(pump);clearInterval(mediaStats);for(const s of sessions)s.stop();addon.macplayCloseVideoWindow();server.close();helper.kill('SIGTERM');setTimeout(()=>process.exit(0),300).unref()}
 process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);process.stdin.on('end',shutdown)

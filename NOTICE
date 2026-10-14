@@ -18,3 +18,12 @@ Version 1.1.0 includes experimental authentication files originating from the
 DiPlay 0.2.6 APK (assets/offline-mfi). Redistribution authorization has not
 been independently established. Their inclusion does not confer Apple/MFi
 certification or transfer rights through the application code license.
+
+Native CarPlay Video additions (2026)
+Protocol and loopback resource loader adapted from WilliamSung82/WinPlay
+commit 6687fb21742a0e214dfc87a352c03848a2233603 and shihabal3amri/DiPlay
+commit 3f554012a5a60817ef18e3e4fcdb2ff9ed8a7069, under GPL-3.0-or-later.
+The AVKit player and Swift/engine bridge are additions in this fork.
+Preview packages reuse the unmodified Roylyl/MacPlay V1.2.2 native runtime;
+the Swift application and TypeScript engine are rebuilt from this fork.
+See docs/carplay-video.md and the embedded VIDEO-BUILD.json for details.

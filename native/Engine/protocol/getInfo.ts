@@ -10,6 +10,7 @@
  */
 
 import type { PlistValue } from './bplist'
+import { videoPlaybackInfo } from './videoInCar'
 import { knobHidDevice, mediaHidDevice, telephonyHidDevice, touchHidDevice } from './hid'
 import type { CpDisplayConfig, CpStackConfig } from './types'
 
@@ -212,5 +213,6 @@ export function buildInfoPlist(cfg: CpStackConfig): PlistValue {
     }))
   }
   if (cfg.hevc) info.hevcInfo = {}
+  if (cfg.videoInCar) info.videoPlaybackInfo = videoPlaybackInfo(info.features as number, cfg.videoPlaybackAllowed === true)
   return info
 }
